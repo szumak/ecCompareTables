@@ -22,8 +22,11 @@ my @ConfigIniDict = ('port','ipaddr','username','password','dbname');
 #this variable contains readed values from ini file. First 'general' block is readed, and later if same
 #param is defined for the database the first is covered.
 my %CONF_INI_PARAMS;
+#Statistics. A structure containing information about the consistency
+my %Statistics;
 
 ### M A I N ###                                 << starting here
+$Statistics{'ScriptStart'} = time;
 main();
 ### E  N  D ###
 
@@ -89,12 +92,17 @@ sub main
  # ----------------------
  # running main part
  program($source_dbh,$dest_dbh);
+ print_data();
 
 } #main
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 sub program()
 {
 	my ($source_dbh, $dest_dbh) = @_;
+    $Statistics{'TotalConsistent'}   = 0;
+    $Statistics{'TotalInconsistent'} = 0;
+    $Statistics{'RowsOnBothSites'}   = 0;
+    $Statistics{'RowsOnlyOnSource'}  = 0;
 	my $sourceTableRowCount = getNumberOfrows($source_dbh,$CONF_PARAMS{'SourceTable'});
 	my $destTableRowCount  = getNumberOfrows($dest_dbh,$CONF_PARAMS{'DestTable'});
 	logM(3,"Source table row count: " . $sourceTableRowCount);
@@ -121,7 +129,7 @@ sub program()
 	my $i = 0; 
 	while ( ! $end ) { 
 		my ($SourceTbl_ptr,$IdsList_ptr, $idField_number) = getRows($source_dbh,100,$i);
-		my $DestTbl_ptr;
+        my $DestTbl_ptr;
 		$i++;
 		if ( $#{$SourceTbl_ptr} == -1 ) { 
 			$end = 1; 
@@ -132,6 +140,17 @@ sub program()
 	} #while
 } #program
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+sub print_table_from_ptr
+{
+    my ($arrPtr) = @_;
+    foreach ( @{$arrPtr} ) {
+        foreach ( @{$_} ) {
+            print $_ . ",";
+        } #foreach
+        print "\n";
+    } #foreach
+} #print_array
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 sub compare_table_chunk 
 {
 	my ($SourceTbl_ptr, $DestTbl_ptr, $IdsList_ptr, $idField_number) = @_;
@@ -140,34 +159,62 @@ sub compare_table_chunk
         my $id = $_; #id which we are comparing 
 		$srcIndex  = findArrIndex($SourceTbl_ptr, $id, $idField_number);
         $destIndex = findArrIndex($DestTbl_ptr,   $id, $idField_number);
-        logM(3,"[compare_rows] found indexes to compare: src(".$srcIndex.") dest(".$destIndex.")");
+        logM(3,"[compare_table_chunk] found indexes to compare: src(".$srcIndex.") dest(".$destIndex.")");
         if ( $srcIndex  < 0 ) {
             logM(2,"Id: ".$id." not found in the source database, this is weird");
         } # if
         if ( $destIndex < 0 ) {
+            $Statistics{'RowsOnlyOnSource'}++;
             logM(1,"Id: ". $id ." not found in the destination database, :/"); 
-        } # if 
-        compare_rows( ${SourceTbl_ptr}[$srcIndex], ${DestTbl_ptr}[$destIndex] );
+        } else { 
+            # I have two correct ids 
+            $Statistics{'RowsOnBothSites'}++;
+            compare_rows( ${$SourceTbl_ptr}[$srcIndex], ${$DestTbl_ptr}[$destIndex] );
+        }   
 	} # foreach 
 } # compare_table_chunk
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 sub compare_rows 
 {
+    logM(3,"[compare_rows]");
     my ($rowA, $rowB) = @_;
+    $Statistics{'TotalRows'}++;
+    my $rowConsistent = 1; 
     for ( my $i=0; $i<=$#{$rowA}; $i++) {
+        my $columnName = ${$Statistics{'OrderedColumnNames'}}[$i];
         if ( ${$rowA}[$i] eq ${$rowB}[$i] ) {
-            print "+"; 
+            $Statistics{'ColumnsHashConsistent'}->{$columnName}++;
         } else {
-            print "-";
+            $rowConsistent = 0;
+            $Statistics{'ColumnsHashInconsistent'}->{$columnName}++;
         } # else
     } # for
+    if ( $rowConsistent eq 1 ) {
+            $Statistics{'TotalConsistent'}++;
+        } else {
+            $Statistics{'TotalInconsistent'}++;
+        } #if
 } # compare_rows
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+sub print_data
+{
+    $Statistics{'ScriptEnd'} = time;
+    logM(0,"script ended in: " . ( $Statistics{'ScriptEnd'} - $Statistics{'ScriptStart'} ) . "[s]");
+    logM(0,"Total rows checked: " . $Statistics{'TotalRows'} );
+    logM(0,"Rows exists on both sites: " . $Statistics{'RowsOnBothSites'} );
+    logM(0,"Rows exists only on source: " . $Statistics{'RowsOnlyOnSource'} );
+    logM(0,"Total rows consistent: " . $Statistics{'TotalConsistent'} );
+    logM(0,"Total rows inconsistent: " . $Statistics{'TotalInconsistent'} );
+    foreach ( @{$Statistics{'OrderedColumnNames'}} ) {
+        print $_ .": consistent(" . $Statistics{'ColumnsHashConsistent'}->{$_} . ") inconsistent(" . $Statistics{'ColumnsHashInconsistent'}->{$_} . ")\n";
+    } #foreach 
+} #print_data
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 sub findArrIndex 
 {
     my ($SourceTbl_ptr,$id,$idField_number) = @_;
     my $index=0;
-    foreach ( @{$$SourceTbl_ptr} ){
+    foreach ( @{$SourceTbl_ptr} ){
         if ( ${$_}[$idField_number] eq  $id) {
             return $index; 
         } #if 
@@ -180,14 +227,14 @@ sub getRowsFromArray # from destination
 {
 	my ($dbh,$IdsList_ptr) = @_;
 	my @retArray=();
-	my $select_q = "select * from ".$CONF_PARAMS{'SourceTable'}." where ". $CONF_PARAMS{'IDField'} . " in ( ? )";
+    my $ids = join(',',@{$IdsList_ptr}); 
+	my $select_q = "select * from ".$CONF_PARAMS{'DestTable'}." where ". $CONF_PARAMS{'IDField'} . " in (".$ids.")";
 	logM(3,"[getRowsFromArray] db rows selecting query: ".$select_q);
 	logM(3,"[getRowsFromArray] ids count: " . ($#{$IdsList_ptr}+1));
-	my $ids = join(',',@{$IdsList_ptr}); 
 	my $selSQL = $dbh->prepare( $select_q );
 	my $queryStart = time();
     logM(3,"Executing query on the database");
-    $selSQL->execute( $ids );
+    $selSQL->execute();
     my $queryEnd = time();
     logM(3,"Query executed in: ". ($queryEnd-$queryStart) . "[s]");
     while ( my $row = $selSQL->fetchrow_arrayref() ) {
@@ -226,6 +273,22 @@ sub getRows #from source
 	        push @column_names, $field;
 	        $c++;
    	} #foreach
+    #we are going to execute this block once 
+    if ( ! defined $Statistics{'OrderedColumnNames'} ) {
+        logM(3,"[getRows] Setting Statistics->ColumnsHash");
+        my %a_hash;
+        my %b_hash;
+        my @arr; 
+        foreach ( @{ $selSQL->{NAME_lc} } ) 
+        {
+            $a_hash{$_} = 0;
+            $b_hash{$_} = 0;
+            push @arr,$_;
+        } # foreach
+        $Statistics{'ColumnsHashConsistent'  } = \%a_hash;
+        $Statistics{'ColumnsHashInconsistent'} = \%b_hash;
+        $Statistics{'OrderedColumnNames'     } = \@arr;
+    } #if
     while ( my $row = $selSQL->fetchrow_arrayref() ) {
     	my @array = @{$row};
     	push @retArray, \@array;
@@ -357,7 +420,8 @@ sub readConfigFile
    return \%DB;
 } #readConfigFile
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-sub getNumberOfrows {
+sub getNumberOfrows 
+{
         my ($dbh, $tableName) = @_;
         logM(3,"enter: getNumberOfrows tableName=".$tableName);
         if ( $tableName eq "" ) 
