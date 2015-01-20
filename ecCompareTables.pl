@@ -89,6 +89,9 @@ sub main
  # connecting to database
 	my $source_dbh = make_database_connection($source_db_ini);
 	my $dest_dbh   = make_database_connection($dest_db_ini);
+ # setting the same timezone 
+    sessionParams($source_dbh);
+    sessionParams($dest_dbh);
  # ----------------------
  # running main part
  program($source_dbh,$dest_dbh);
@@ -440,3 +443,14 @@ sub getNumberOfrows
         my $rc = $sqlQuery->finish;
         return $retVal;
 } #getNumberOfrows
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+sub sessionParams {
+        my ($dbh) = @_;
+        my $query = "SET SESSION  time_zone = '+11:00';";
+        my $sqlQuery  = $dbh->prepare($query)
+            or die  "SQL prepare error. Can't prepare \'$query\': $dbh->errstr\n";
+        my $rv = $sqlQuery->execute
+            or die  " Can't execute the query \'$query\': $sqlQuery->errstr";
+        my $rc = $sqlQuery->finish;
+} #sessionParams
+
